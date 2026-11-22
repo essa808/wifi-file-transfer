@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#070b16">
+  <title>نقل الملفات</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%235b8cff'/%3E%3Cpath d='M12 17V7m0 0l-4 4m4-4l4 4' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="glow glow-a"></div>
+  <div class="glow glow-b"></div>
+
+  <div class="wrap">
+    <header class="top">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="14" height="10" rx="2"/>
+          <path d="M7 18h4"/>
+          <rect x="17" y="8" width="5" height="12" rx="1.5"/>
+          <path d="M9 12l3-3 3 3M12 9v5"/>
+        </svg>
+      </div>
+      <div class="titles">
+        <h1>نقل الملفات</h1>
+        <p>واي فاي • بدون إنترنت • بدون تثبيت</p>
+      </div>
+      <span id="status" class="status on"><span class="dot"></span><span id="statusText">متصل</span></span>
+    </header>
+
+    <div id="offline" class="banner hidden">
+      <strong>انقطع الاتصال بالسيرفر.</strong>
+      <span>شغّل <code>start.bat</code> من مجلد التطبيق على الكمبيوتر. لا تحتاج إبقاء أي نافذة مفتوحة — السيرفر يشتغل بالخلفية.</span>
+    </div>
+
+    <main>
+      <section id="connectCard" class="card hidden">
+        <div class="card-head">
+          <h2>اتصال الجوال</h2>
+          <span class="pill">باركود</span>
+        </div>
+        <div class="connect">
+          <div class="qr-box"><img id="qr" alt="باركود الاتصال"></div>
+          <div class="connect-info">
+            <p class="muted">امسح الباركود بكاميرا الجوال، أو افتح الرابط من المتصفح:</p>
+            <div class="url-row">
+              <code id="url" dir="ltr"></code>
+              <button id="copyBtn" class="btn ghost small" type="button">نسخ</button>
+            </div>
+            <p class="muted small">لازم يكون الجوال والكمبيوتر على نفس شبكة الواي فاي.</p>
+            <p class="muted small">شغّل start.bat مرة واحدة على الكمبيوتر وسيبقى يعمل بالخلفية.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>من الجوال إلى الكمبيوتر</h2>
+          <button id="openUploadsBtn" class="btn ghost small hidden" type="button">فتح المجلد</button>
+        </div>
+        <div id="drop" class="drop">
+          <svg class="drop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 16V4"/>
+            <path d="M7 9l5-5 5 5"/>
+            <path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3"/>
+          </svg>
+          <p class="drop-title">اسحب الملفات هنا أو اخترها</p>
+          <p class="muted small">تنحفظ في مجلد <code>من الهاتف</code> داخل Downloads على الكمبيوتر</p>
+          <div class="actions">
+            <button id="pickBtn" class="btn primary" type="button">اختيار ملفات</button>
+            <button id="camBtn" class="btn hidden" type="button">تصوير وإرسال</button>
+          </div>
+          <input id="pick" type="file" multiple hidden>
+          <input id="cam" type="file" accept="image/*" capture="environment" hidden>
+        </div>
+        <ul id="queue" class="queue"></ul>
+      </section>
+
+      <section id="sharedCard" class="card drop-card">
+        <div class="card-head">
+          <h2>من الكمبيوتر إلى الجوال</h2>
+          <div class="head-actions">
+            <button id="openSharedBtn" class="btn ghost small hidden" type="button">فتح المجلد</button>
+            <button id="sharedPickBtn" class="btn primary small" type="button">إضافة ملفات</button>
+          </div>
+        </div>
+        <p class="muted small hint">اسحب ملفات إلى هذا القسم أو اضغط «إضافة ملفات»، أو ضعها يدويًا في مجلد <code>إلى الهاتف</code> داخل Documents وتظهر هنا تلقائيًا.</p>
+        <input id="sharedPick" type="file" multiple hidden>
+        <ul id="queueShared" class="queue"></ul>
+        <div class="toolbar">
+          <input id="search" type="search" placeholder="بحث في الملفات" aria-label="بحث">
+          <select id="sort" aria-label="ترتيب">
+            <option value="new">الأحدث</option>
+            <option value="name">الاسم</option>
+            <option value="size">الحجم</option>
+          </select>
+        </div>
+        <div id="selBar" class="selbar hidden">
+          <label class="selall"><input id="selAll" type="checkbox" class="chk"> <span id="selCount">تحديد الكل</span></label>
+          <button id="zipBtn" class="btn ghost small" type="button" disabled>تحميل ZIP</button>
+          <button id="delSelBtn" class="btn ghost small danger" type="button" disabled>حذف المحدد</button>
+        </div>
+        <ul id="files" class="files"></ul>
+        <p id="filesEmpty" class="empty hidden">لا توجد ملفات في مجلد «إلى الهاتف» بعد.</p>
+      </section>
+
+      <section id="peersCard" class="card">
+        <div class="card-head">
+          <h2>كمبيوتر آخر</h2>
+          <span class="pill">نقل بين كمبيوترين</span>
+        </div>
+        <p class="muted small">عنوان هذا الكمبيوتر: <code id="myAddress">…</code></p>
+        <p class="muted small hint">أرسل طلب ربط للكمبيوتر الآخر (أو اضغط «طلب ربط» من نتائج البحث) — يوصل طلبك لشاشته، ولا يتم الربط إلا إذا وافق واختار نوع الصلاحية: يرسل ويستلم، أو يرسل لك فقط، أو يستلم منك فقط.</p>
+        <div class="actions"><button id="peerScan" class="btn small" type="button">البحث عن الأجهزة في الشبكة</button></div>
+        <ul id="peerFound" class="files peers found"></ul>
+        <p id="scanEmpty" class="empty hidden">ما لقيت أي كمبيوتر عليه التطبيق — تأكد أنه مثبت وشغال على نفس شبكة الواي فاي.</p>
+        <div class="actions peer-form">
+          <input id="peerHost" type="text" inputmode="decimal" autocomplete="off" placeholder="عنوان الكمبيوتر الآخر (مثال 192.168.3.15)" aria-label="عنوان الكمبيوتر الآخر">
+          <button id="peerAdd" class="btn primary small" type="button">طلب ربط</button>
+        </div>
+        <div id="pairReqWrap" class="hidden">
+          <p class="muted small">طلبات وصلتك — اختر نوع القبول:</p>
+          <ul id="pairRequests" class="files peers"></ul>
+        </div>
+        <ul id="peerList" class="files peers"></ul>
+        <p id="peerEmpty" class="empty hidden">لم تربط أي كمبيوتر بعد.</p>
+        <input id="peerPick" type="file" multiple hidden>
+        <ul id="peerQueue" class="queue"></ul>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>نص أو رابط</h2>
+          <span class="pill">بين الجهازين</span>
+        </div>
+        <textarea id="clipText" rows="3" dir="auto" placeholder="اكتب نصًا أو الصق رابطًا ليظهر على الجهاز الآخر"></textarea>
+        <div class="actions end"><button id="clipSend" class="btn primary small" type="button">إرسال</button></div>
+        <ul id="clips" class="files clips"></ul>
+        <p id="clipsEmpty" class="empty hidden">لا توجد نصوص بعد.</p>
+      </section>
+    </main>
+
+    <footer>النقل يتم مباشرة بين جهازيك على الشبكة المحلية — بدون رفع للإنترنت.</footer>
+  </div>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-box">
+      <div class="modal-head"><span id="modalTitle"></span><button id="modalClose" class="btn ghost small" type="button">إغلاق</button></div>
+      <div id="modalBody" class="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
