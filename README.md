@@ -4,7 +4,19 @@
   <p>تطبيق ويندوز محلي + واجهة ويب تفتح على الجوال — بدون إنترنت، بدون حساب، وبدون تثبيت على الجوال</p>
 </div>
 
+[![تحميل المثبت](https://img.shields.io/badge/download-Windows%20Setup-2ea44f)](https://github.com/essa808/wifi-file-transfer/releases/latest)
+[![نسخة محمولة](https://img.shields.io/badge/download-Portable-blue)](https://github.com/essa808/wifi-file-transfer/releases/latest)
+
 ![واجهة الجوال](docs/screenshot-phone.png)
+
+## تحميل التطبيق الجاهز
+
+الملفات الجاهزة موجودة في صفحة **Releases** لهذا المستودع:
+
+- `WiFi-File-Transfer-Setup.exe` — المثبت (يشمل Node.js ويعمل بدون إنترنت).
+- `WiFi-File-Transfer-portable.zip` — نسخة محمولة بدون تثبيت.
+
+الرابط المباشر: <https://github.com/essa808/wifi-file-transfer/releases/latest>
 
 ## المزايا
 
