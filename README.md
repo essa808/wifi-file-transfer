@@ -8,13 +8,14 @@
 [![نسخة محمولة](https://img.shields.io/badge/download-Portable-blue)](https://github.com/essa808/wifi-file-transfer/releases/latest)
 
 ![واجهة الجوال](docs/screenshot-phone.png)
+![السجل ومزامنة النصوص](docs/screenshot-history.png)
 
 ## تحميل التطبيق الجاهز
 
 الملفات الجاهزة موجودة في صفحة **Releases** لهذا المستودع:
 
 - `WiFi-File-Transfer-Setup14.exe` — المثبت (يشمل Node.js ويعمل بدون إنترنت).
-- `WiFi-File-Transfer-portable.zip` — نسخة محمولة بدون تثبيت.
+- `WiFi-File-Transfer-portable.zip` — نسخة محمولة بدون تثبيت (يتطلب Node.js 18 أو أحدث).
 
 التحديث فوق نسخة مثبتة يحافظ على بياناتك: التوكن وروابط الأجهزة المربوطة والملفات.
 
