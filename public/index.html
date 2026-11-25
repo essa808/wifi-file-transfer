@@ -6,6 +6,9 @@
   <meta name="theme-color" content="#070b16">
   <title>نقل الملفات</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%235b8cff'/%3E%3Cpath d='M12 17V7m0 0l-4 4m4-4l4 4' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+  <link rel="manifest" href="/manifest.json" crossorigin="use-credentials">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="نقل الملفات">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -26,6 +29,7 @@
         <h1>نقل الملفات</h1>
         <p>واي فاي • بدون إنترنت • بدون تثبيت</p>
       </div>
+      <button id="installBtn" class="btn ghost small hidden" type="button">إضافة للشاشة الرئيسية</button>
       <span id="status" class="status on"><span class="dot"></span><span id="statusText">متصل</span></span>
     </header>
 
@@ -69,9 +73,11 @@
           <p class="muted small">تنحفظ في مجلد <code>من الهاتف</code> داخل Downloads على الكمبيوتر</p>
           <div class="actions">
             <button id="pickBtn" class="btn primary" type="button">اختيار ملفات</button>
+            <button id="pickDirBtn" class="btn" type="button">اختيار مجلد</button>
             <button id="camBtn" class="btn hidden" type="button">تصوير وإرسال</button>
           </div>
           <input id="pick" type="file" multiple hidden>
+          <input id="pickDir" type="file" webkitdirectory multiple hidden>
           <input id="cam" type="file" accept="image/*" capture="environment" hidden>
         </div>
         <ul id="queue" class="queue"></ul>
@@ -82,11 +88,13 @@
           <h2>من الكمبيوتر إلى الجوال</h2>
           <div class="head-actions">
             <button id="openSharedBtn" class="btn ghost small hidden" type="button">فتح المجلد</button>
+            <button id="sharedPickDirBtn" class="btn ghost small" type="button">إضافة مجلد</button>
             <button id="sharedPickBtn" class="btn primary small" type="button">إضافة ملفات</button>
           </div>
         </div>
-        <p class="muted small hint">اسحب ملفات إلى هذا القسم أو اضغط «إضافة ملفات»، أو ضعها يدويًا في مجلد <code>إلى الهاتف</code> داخل Documents وتظهر هنا تلقائيًا.</p>
+        <p class="muted small hint">اسحب ملفات أو مجلدات إلى هذا القسم أو اضغط «إضافة ملفات»، أو ضعها يدويًا في مجلد <code>إلى الهاتف</code> داخل Documents وتظهر هنا تلقائيًا.</p>
         <input id="sharedPick" type="file" multiple hidden>
+        <input id="sharedPickDir" type="file" webkitdirectory multiple hidden>
         <ul id="queueShared" class="queue"></ul>
         <div class="toolbar">
           <input id="search" type="search" placeholder="بحث في الملفات" aria-label="بحث">
@@ -134,10 +142,23 @@
           <h2>نص أو رابط</h2>
           <span class="pill">بين الجهازين</span>
         </div>
+        <label id="clipSyncWrap" class="selall sync hidden"><input id="clipSync" type="checkbox" class="chk"> <span>مزامنة الحافظة تلقائيًا — أي نص تنسخه في الكمبيوتر يظهر هنا، وأي نص يرسله الجوال ينحط في حافظة الكمبيوتر</span></label>
         <textarea id="clipText" rows="3" dir="auto" placeholder="اكتب نصًا أو الصق رابطًا ليظهر على الجهاز الآخر"></textarea>
         <div class="actions end"><button id="clipSend" class="btn primary small" type="button">إرسال</button></div>
         <ul id="clips" class="files clips"></ul>
         <p id="clipsEmpty" class="empty hidden">لا توجد نصوص بعد.</p>
+      </section>
+
+      <section id="historyCard" class="card">
+        <div class="card-head">
+          <h2>السجل</h2>
+          <div class="head-actions">
+            <button id="notifyBtn" class="btn ghost small hidden" type="button">تفعيل الإشعارات</button>
+            <button id="historyClear" class="btn ghost small danger" type="button">مسح السجل</button>
+          </div>
+        </div>
+        <ul id="history" class="files"></ul>
+        <p id="historyEmpty" class="empty hidden">لا توجد عمليات بعد.</p>
       </section>
     </main>
 

@@ -7,7 +7,8 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { once } = require('events');
-const { exec } = require('child_process');
+const { exec, spawn } = require('child_process');
+const { pipeline } = require('stream/promises');
 const http = require('http');
 
 const ROOT = __dirname;
@@ -29,6 +30,9 @@ const CRASH_LOG = path.join(DATA_DIR, 'crash.log');
 const CLIPS_FILE = path.join(DATA_DIR, 'clips.json');
 const PORT_FILE = path.join(DATA_DIR, 'port.txt');
 const PID_FILE = path.join(DATA_DIR, 'server.pid');
+const PARTIAL_DIR = path.join(DATA_DIR, '_partial');
+const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const START_PORT = Number(process.env.PORT) || 3000;
 
 // Older builds kept the data next to the program; move anything still there into data\.
@@ -95,6 +99,14 @@ process.on('unhandledRejection', (err) => logCrash('unhandledRejection', err));
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(SHARED_DIR, { recursive: true });
 fs.mkdirSync(RECYCLE_DIR, { recursive: true });
+fs.mkdirSync(PARTIAL_DIR, { recursive: true });
+// drop interrupted uploads nobody resumed within a week
+for (const n of fs.readdirSync(PARTIAL_DIR)) {
+  try {
+    const p = path.join(PARTIAL_DIR, n);
+    if (Date.now() - fs.statSync(p).mtimeMs > 7 * 864e5) fs.unlinkSync(p);
+  } catch {}
+}
 
 // Earlier builds kept both visible folders inside data\; move their contents to the
 // user's own folders once, without overwriting anything already there.
@@ -464,7 +476,7 @@ function can(req, perm) {
   return p === 'both' || p === perm;
 }
 
-const PEER_ALLOWED = new Set(['GET:/api/files', 'GET:/api/download', 'GET:/api/clips', 'POST:/api/upload', 'POST:/api/clips', 'GET:/api/events', 'GET:/api/ping']);
+const PEER_ALLOWED = new Set(['GET:/api/files', 'GET:/api/download', 'GET:/api/clips', 'POST:/api/upload', 'GET:/api/chunk', 'POST:/api/chunk', 'POST:/api/clips', 'GET:/api/events', 'GET:/api/ping']);
 
 app.use((req, res, next) => {
   if (isLoopback(req)) {
@@ -483,6 +495,21 @@ app.use((req, res, next) => {
   }
   req.user = id;
   next();
+});
+
+// Home-screen install: start_url carries the token because an installed app may not share the browser's cookies.
+app.get('/manifest.json', (req, res) => {
+  res.type('application/manifest+json').json({
+    name: 'نقل الملفات',
+    short_name: 'نقل الملفات',
+    start_url: req.user.kind === 'owner' ? `/?t=${TOKEN}` : '/',
+    display: 'standalone',
+    background_color: '#070b16',
+    theme_color: '#070b16',
+    lang: 'ar',
+    dir: 'rtl',
+    icons: [{ src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }],
+  });
 });
 
 app.use(express.static(PUBLIC_DIR, { index: 'index.html' }));
@@ -616,11 +643,129 @@ app.post('/api/upload', (req, res) => {
       return res.status(400).json({ ok: false, error: 'لم تصل أي ملفات' });
     }
     if (req.query.to === 'shared') broadcast('files');
+    for (const f of req.files) logEvent(req.query.to === 'shared' ? 'shared' : 'in', f.filename, f.size, req);
     res.json({
       ok: true,
       files: req.files.map((f) => ({ name: path.basename(f.filename), size: f.size })),
     });
   });
+});
+
+/* ---------- resumable uploads: the browser sends slices; the .part file's size is the resume point ---------- */
+
+// id -> { req, done } for the slice being written. The client sends slices one at a time, so a new
+// request for the same id means the old one is dead (phone dropped off Wi-Fi without closing the socket).
+const chunkBusy = new Map();
+function partPath(id) {
+  return /^[A-Za-z0-9_-]{4,100}$/.test(id) ? path.join(PARTIAL_DIR, id + '.part') : null;
+}
+const partSize = async (p) => ((await fsp.stat(p).catch(() => null)) || { size: 0 }).size;
+
+app.get('/api/chunk', async (req, res) => {
+  if (!can(req, 'send')) return res.status(403).json({ ok: false, error: 'الصلاحية الممنوحة لا تسمح بالإرسال إليك' });
+  const p = partPath(String(req.query.id || ''));
+  if (!p) return res.status(400).json({ error: 'معرّف غير صالح' });
+  res.set('Cache-Control', 'no-store');
+  res.json({ size: await partSize(p) });
+});
+
+app.post('/api/chunk', async (req, res) => {
+  if (!can(req, 'send')) return res.status(403).json({ ok: false, error: 'الصلاحية الممنوحة لا تسمح بالإرسال إليك' });
+  const id = String(req.query.id || '');
+  const p = partPath(id);
+  const total = Number(req.query.size);
+  const offset = Number(req.query.offset);
+  if (!p || !Number.isSafeInteger(total) || total < 0 || !Number.isSafeInteger(offset)) {
+    return res.status(400).json({ error: 'طلب غير صالح' });
+  }
+  const stale = chunkBusy.get(id);
+  if (stale) {
+    stale.req.destroy();
+    await stale.done;
+  }
+  if (chunkBusy.has(id)) {
+    // a third request raced us to the slot; let the client re-sync
+    req.resume();
+    return res.status(409).json({ size: await partSize(p) });
+  }
+  let release;
+  chunkBusy.set(id, { req, done: new Promise((r) => (release = r)) });
+  try {
+    const have = await partSize(p);
+    if (offset !== have) {
+      req.resume();
+      return res.status(409).json({ size: have });
+    }
+    try {
+      await pipeline(req, fs.createWriteStream(p, { flags: 'a' }));
+    } catch (err) {
+      // connection dropped mid-slice: the bytes that arrived stay, the client resumes from GET /api/chunk
+      if (err.code === 'ENOSPC' || err.code === 'EACCES' || err.code === 'EPERM') {
+        return res.status(500).json({ error: uploadError(err) });
+      }
+      return res.destroy();
+    }
+    const size = await partSize(p);
+    if (size < total) return res.json({ size });
+    if (size > total) {
+      await fsp.unlink(p).catch(() => {});
+      return res.status(400).json({ error: 'حجم الملف غير متطابق — أعد الإرسال' });
+    }
+    const shared = req.query.to === 'shared';
+    const base = shared ? SHARED_DIR : path.join(UPLOAD_DIR, new Date().toISOString().slice(0, 10));
+    // keep a dropped folder's structure; safeName turns '..' into 'file', so nothing escapes base
+    const segs = String(req.query.name || 'file').split(/[\\/]+/).filter(Boolean).slice(-8).map(safeName);
+    const dir = path.join(base, ...segs.slice(0, -1));
+    await fsp.mkdir(dir, { recursive: true });
+    const final = path.join(dir, uniqueName(dir, segs[segs.length - 1] || 'file'));
+    try {
+      await fsp.rename(p, final);
+    } catch {
+      await fsp.copyFile(p, final);
+      await fsp.unlink(p).catch(() => {});
+    }
+    logEvent(shared ? 'shared' : 'in', path.relative(base, final).replace(/\\/g, '/'), size, req);
+    if (shared) broadcast('files');
+    res.json({ size, done: true });
+  } catch (err) {
+    res.status(500).json({ error: uploadError(err) });
+  } finally {
+    if (chunkBusy.get(id) && chunkBusy.get(id).req === req) chunkBusy.delete(id);
+    release();
+  }
+});
+
+/* ---------- transfer history ---------- */
+
+let history = [];
+try {
+  history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+  if (!Array.isArray(history)) history = [];
+} catch {}
+
+function who(req) {
+  if (req.user && req.user.kind === 'peer') return req.user.link.name;
+  return isLoopback(req) ? 'هذا الكمبيوتر' : 'الجوال';
+}
+
+function logEvent(kind, name, size, req) {
+  const ev = { t: Date.now(), kind, name: String(name).slice(0, 200), size: size || 0, by: who(req) };
+  history.unshift(ev);
+  history = history.slice(0, 300);
+  fsp.writeFile(HISTORY_FILE, JSON.stringify(history)).catch(() => {});
+  broadcast('history', ev);
+}
+
+app.get('/api/history', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ history });
+});
+
+app.delete('/api/history', (req, res) => {
+  history = [];
+  fsp.writeFile(HISTORY_FILE, '[]').catch(() => {});
+  broadcast('history');
+  res.json({ ok: true });
 });
 
 async function listDir(dir, max = 500) {
@@ -676,6 +821,7 @@ app.get('/api/download', (req, res) => {
     if (req.query.inline && INLINE_OK.test(target)) {
       return res.sendFile(target, { dotfiles: 'allow', headers: { 'Content-Disposition': 'inline' } });
     }
+    logEvent('download', path.relative(SHARED_DIR, target).replace(/\\/g, '/'), st.size, req);
     res.download(target, path.basename(target), { dotfiles: 'allow' });
   });
 });
@@ -736,6 +882,7 @@ app.get('/api/zip', async (req, res) => {
     if (st && st.isFile() && st.size < 0xffffffff) items.push({ rel: String(rel), p, st });
   }
   if (!items.length) return res.status(404).json({ error: 'لا توجد ملفات' });
+  logEvent('download', `ZIP (${items.length} ملفات)`, items.reduce((n, i) => n + i.st.size, 0), req);
 
   res.set({ 'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="files.zip"' });
   let offset = 0;
@@ -794,8 +941,85 @@ app.post('/api/clips', (req, res) => {
   const text = String((req.body && req.body.text) || '').trim();
   if (!text) return res.status(400).json({ ok: false, error: 'النص فارغ' });
   addClip(text);
+  if (settings.clipSync && !isLoopback(req)) setPcClipboard(text);
   res.json({ ok: true });
 });
+
+/* ---------- clipboard sync (Windows): PC copies become clips, phone clips land in the PC clipboard ---------- */
+
+let settings = {};
+try {
+  settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) || {};
+} catch {}
+const CLIP_SUPPORTED = process.platform === 'win32';
+let clipWatcher = null;
+
+function psEncoded(script) {
+  return ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
+}
+
+// Starts from the current clipboard so turning sync on does not send whatever was copied earlier.
+// Exits on its own once this server is gone (stop.bat kills node with /F, so no exit hook runs).
+const WATCH_PS =
+  `$p = Get-Clipboard -Raw; while ($true) { Start-Sleep -Milliseconds 800; ` +
+  `if (-not (Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue)) { exit }; ` +
+  'try { $c = Get-Clipboard -Raw } catch { $c = $null }; ' +
+  'if ($c -and $c -ne $p) { $p = $c; [Console]::Out.WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($c))); [Console]::Out.Flush() } }';
+
+function startClipWatch() {
+  if (clipWatcher || !CLIP_SUPPORTED) return;
+  const child = spawn('powershell.exe', psEncoded(WATCH_PS), { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  clipWatcher = child;
+  let buf = '';
+  child.stdout.on('data', (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      const text = Buffer.from(line, 'base64').toString('utf8').trim();
+      // skip what we just wrote ourselves from the phone, or the loop would echo it back
+      if (text && (!clips[0] || clips[0].text !== text)) addClip(text);
+    }
+  });
+  child.on('error', () => {});
+  child.on('exit', () => {
+    if (clipWatcher === child) clipWatcher = null;
+    if (settings.clipSync) setTimeout(startClipWatch, 5000).unref();
+  });
+}
+
+function stopClipWatch() {
+  const c = clipWatcher;
+  clipWatcher = null;
+  if (c) c.kill();
+}
+
+function setPcClipboard(text) {
+  if (!CLIP_SUPPORTED) return;
+  const ps = '$b = [Console]::In.ReadToEnd(); Set-Clipboard -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b.Trim())))';
+  const child = spawn('powershell.exe', psEncoded(ps), { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
+  child.on('error', () => {});
+  child.stdin.end(Buffer.from(text, 'utf8').toString('base64'));
+}
+
+app.get('/api/settings', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ clipSync: !!settings.clipSync, clipSupported: CLIP_SUPPORTED });
+});
+
+app.post('/api/settings', (req, res) => {
+  if (!isLoopback(req)) return res.status(403).json({ ok: false, error: 'من الكمبيوتر فقط' });
+  if (req.body && typeof req.body.clipSync === 'boolean') {
+    settings.clipSync = req.body.clipSync;
+    settings.clipSync ? startClipWatch() : stopClipWatch();
+  }
+  fsp.writeFile(SETTINGS_FILE, JSON.stringify(settings)).catch(() => {});
+  res.json({ ok: true, clipSync: !!settings.clipSync });
+});
+
+if (settings.clipSync) startClipWatch();
+process.on('exit', stopClipWatch);
 
 app.delete('/api/clips', (req, res) => {
   clips = clips.filter((c) => c.id !== req.query.id);
@@ -807,8 +1031,9 @@ app.delete('/api/clips', (req, res) => {
 // Server-sent events: the page refreshes its lists without polling.
 const sseClients = new Set();
 
-function broadcast(event) {
-  for (const r of sseClients) r.write(`event: ${event}\ndata: 1\n\n`);
+function broadcast(event, data = 1) {
+  const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const r of sseClients) r.write(msg);
 }
 
 app.get('/api/events', (req, res) => {

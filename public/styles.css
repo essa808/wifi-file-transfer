@@ -461,3 +461,10 @@ textarea { width: 100%; resize: vertical; margin-bottom: 10px; }
   .peer-row { flex-wrap: wrap; }
   .peer-text .btn { white-space: nowrap; }
 }
+
+/* thumbnails, clipboard-sync toggle, history */
+.thumb { width: 42px; height: 42px; flex: none; border-radius: 12px; object-fit: cover; background: rgba(255, 255, 255, 0.05); cursor: zoom-in; }
+.selall.sync { margin-bottom: 10px; align-items: flex-start; line-height: 1.6; }
+.top #installBtn { flex: none; }
+.ext.in { background: rgba(45, 212, 167, 0.14); color: #a7f3d8; }
+.ext.out { background: rgba(91, 140, 255, 0.16); color: #bfd2ff; }

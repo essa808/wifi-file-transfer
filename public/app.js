@@ -5,6 +5,7 @@ let running = false;
 let files = [];
 let clips = [];
 let online = null;
+let isLocal = false;
 const selected = new Set();
 const view = { q: '', sort: 'new' };
 
@@ -63,12 +64,12 @@ function extInfo(name) {
 }
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, ms = 2200) {
   const el = $('#toast');
   el.textContent = msg;
   el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+  toastTimer = setTimeout(() => el.classList.remove('show'), ms);
 }
 
 async function copyText(text) {
@@ -104,6 +105,8 @@ function init() {
   startStatusPolling();
   startEvents();
   initPeers();
+  loadHistory();
+  initInstall();
 
   if (window.matchMedia('(pointer: coarse)').matches) {
     $('#camBtn').classList.remove('hidden');
@@ -114,6 +117,14 @@ function startEvents() {
   const es = new EventSource('/api/events');
   es.addEventListener('files', () => loadFiles(true));
   es.addEventListener('clips', () => loadClips(true));
+  es.addEventListener('history', (e) => {
+    loadHistory();
+    let ev = null;
+    try {
+      ev = JSON.parse(e.data);
+    } catch {}
+    if (ev && ev.kind === 'in' && isLocal) notifyArrival(ev);
+  });
   es.addEventListener('pair', () => {
     loadPairRequests();
     syncOutPeers();
@@ -127,7 +138,9 @@ function startEvents() {
 async function syncInfo() {
   try {
     const info = await fetch('/api/info', { cache: 'no-store' }).then((r) => r.json());
+    isLocal = !!info.isLocal;
     if (info.isLocal) {
+      initLocalExtras();
       $('#connectCard').classList.remove('hidden');
       $('#openUploadsBtn').classList.remove('hidden');
       $('#openSharedBtn').classList.remove('hidden');
@@ -178,10 +191,14 @@ function bindDrop(el, dest) {
     el.classList.add('over');
   });
   el.addEventListener('dragleave', () => el.classList.remove('over'));
-  el.addEventListener('drop', (e) => {
+  el.addEventListener('drop', async (e) => {
     e.preventDefault();
     el.classList.remove('over');
-    addFiles(e.dataTransfer.files, dest);
+    try {
+      addFiles(await droppedItems(e.dataTransfer), dest);
+    } catch {
+      toast('تعذر قراءة المجلد المسحوب');
+    }
   });
 }
 
@@ -189,7 +206,15 @@ function bindEvents() {
   $('#pickBtn').addEventListener('click', () => $('#pick').click());
   $('#camBtn').addEventListener('click', () => $('#cam').click());
   $('#sharedPickBtn').addEventListener('click', () => $('#sharedPick').click());
-  for (const [id, dest] of [['#pick', 'uploads'], ['#cam', 'uploads'], ['#sharedPick', 'shared']]) {
+  $('#pickDirBtn').addEventListener('click', () => $('#pickDir').click());
+  $('#sharedPickDirBtn').addEventListener('click', () => $('#sharedPickDir').click());
+  for (const [id, dest] of [
+    ['#pick', 'uploads'],
+    ['#cam', 'uploads'],
+    ['#sharedPick', 'shared'],
+    ['#pickDir', 'uploads'],
+    ['#sharedPickDir', 'shared'],
+  ]) {
     $(id).addEventListener('change', (e) => {
       addFiles(e.target.files, dest);
       e.target.value = '';
@@ -248,15 +273,77 @@ async function openFolder(which) {
   }
 }
 
-/* ---------- uploads: queue with cancel / retry / failure reason ---------- */
+/* ---------- uploads: resumable queue with speed / time left / cancel / retry ---------- */
+
+const CHUNK = 4 * 1024 * 1024;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function fmtEta(s) {
+  if (!Number.isFinite(s) || s < 0) return '';
+  if (s < 60) return `${s} ث`;
+  if (s < 3600) return `${Math.floor(s / 60)} د ${s % 60} ث`;
+  return `${Math.floor(s / 3600)} س ${Math.floor((s % 3600) / 60)} د`;
+}
+
+// Speed over the last ~3 s, so the estimate follows the current Wi-Fi rate rather than the average.
+function progressLabel(meter, done, total) {
+  const now = performance.now();
+  meter.push([now, done]);
+  while (meter.length > 2 && now - meter[0][0] > 3000) meter.shift();
+  const pct = total ? Math.floor((done / total) * 100) : 100;
+  const [t0, b0] = meter[0];
+  const bps = now - t0 > 300 ? (done - b0) / ((now - t0) / 1000) : 0;
+  if (bps <= 0) return pct + '%';
+  return `${pct}% • ${fmtSize(Math.round(bps))}/ث • باقي ${fmtEta(Math.round((total - done) / bps))}`;
+}
+
+// Same file + destination => same id, so a retry or a re-pick after a dropped connection resumes the .part file.
+function fileId(t) {
+  const s = `${t.dest}|${t.rel}|${t.file.size}|${t.file.lastModified}`;
+  let h1 = 0x811c9dc5;
+  let h2 = 7;
+  for (const ch of s) {
+    const c = ch.codePointAt(0);
+    h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+    h2 = (Math.imul(h2, 31) + c) >>> 0;
+  }
+  return 'f' + h1.toString(36) + h2.toString(36) + '_' + t.file.size.toString(36);
+}
+
+// Folder drops: walk directory entries so the folder structure arrives intact.
+async function droppedItems(dt) {
+  const entries = Array.from(dt.items || [])
+    .map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null))
+    .filter(Boolean);
+  if (!entries.length) return Array.from(dt.files || []);
+  const out = [];
+  const walk = async (e, prefix) => {
+    if (e.isFile) {
+      const file = await new Promise((res, rej) => e.file(res, rej));
+      out.push({ file, rel: prefix + file.name });
+    } else if (e.isDirectory) {
+      const reader = e.createReader();
+      let batch;
+      do {
+        batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        for (const c of batch) await walk(c, prefix + e.name + '/');
+      } while (batch.length);
+    }
+  };
+  for (const e of entries) await walk(e, '');
+  return out;
+}
 
 function addFiles(list, dest) {
-  for (const file of Array.from(list || [])) enqueue(file, dest);
+  for (const item of Array.from(list || [])) {
+    const file = item.file || item;
+    enqueue(file, dest, item.rel || file.webkitRelativePath || file.name);
+  }
   runQueue();
 }
 
-function enqueue(file, dest) {
-  const t = { file, dest, xhr: null, state: 'wait' };
+function enqueue(file, dest, rel) {
+  const t = { file, dest, rel, xhr: null, state: 'wait' };
   const li = document.createElement('li');
   li.className = 'q-item';
   li.innerHTML =
@@ -268,7 +355,7 @@ function enqueue(file, dest) {
     '<button type="button" class="btn ghost small q-rm hidden">إزالة</button>' +
     '</div>' +
     '<div class="bar"><div class="bar-fill"></div></div>';
-  li.querySelector('.q-name').textContent = file.name;
+  li.querySelector('.q-name').textContent = rel;
   li.querySelector('.q-size').textContent = fmtSize(file.size);
   t.li = li;
   t.fill = li.querySelector('.bar-fill');
@@ -282,7 +369,8 @@ function enqueue(file, dest) {
       pending.push(t);
       runQueue();
     } else if (t.state === 'run') {
-      t.xhr.abort();
+      t.aborted = true;
+      if (t.xhr) t.xhr.abort();
     } else if (t.state === 'wait') {
       pending.splice(pending.indexOf(t), 1);
       li.remove();
@@ -318,51 +406,82 @@ async function runQueue() {
   running = false;
 }
 
-function send(t) {
-  return new Promise((resolve) => {
-    t.state = 'run';
-    t.status.textContent = '0%';
+// One slice; resolves {status, body}, rejects when the connection drops.
+function putChunk(t, id, offset, end, onBytes) {
+  return new Promise((resolve, reject) => {
+    const q = new URLSearchParams({ id, to: t.dest, name: t.rel, size: t.file.size, offset });
     const xhr = new XMLHttpRequest();
     t.xhr = xhr;
-    xhr.open('POST', '/api/upload?to=' + t.dest);
-
-    xhr.upload.onprogress = (e) => {
-      if (!e.lengthComputable) return;
-      const pct = Math.min(100, Math.round((e.loaded / e.total) * 100));
-      t.fill.style.width = pct + '%';
-      t.status.textContent = pct + '%';
-    };
-
+    xhr.open('POST', '/api/chunk?' + q);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => onBytes(offset + e.loaded);
     xhr.onload = () => {
-      if (xhr.status === 200) {
+      let body = {};
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {}
+      resolve({ status: xhr.status, body });
+    };
+    xhr.onerror = xhr.onabort = xhr.ontimeout = () => reject(new Error('net'));
+    xhr.send(t.file.slice(offset, end));
+  });
+}
+
+async function send(t) {
+  t.state = 'run';
+  t.aborted = false;
+  const id = fileId(t);
+  const total = t.file.size;
+  let meter = [];
+  let offset = null;
+  let tries = 0;
+  const show = (done) => {
+    t.fill.style.width = (total ? Math.min(100, (done / total) * 100) : 100) + '%';
+    t.status.textContent = progressLabel(meter, done, total);
+  };
+  t.status.textContent = '0%';
+
+  while (true) {
+    if (t.aborted) return failTask(t, 'أُلغي — اضغط «إعادة» ليكمل من حيث وقف');
+    try {
+      if (offset === null) {
+        const r = await fetch('/api/chunk?id=' + id, { cache: 'no-store' });
+        if (!r.ok) {
+          const b = await r.json().catch(() => ({}));
+          return failTask(t, b.error || 'فشل (' + r.status + ')');
+        }
+        offset = (await r.json()).size || 0;
+        if (offset > total) offset = 0;
+        meter = [];
+      }
+      const r = await putChunk(t, id, offset, Math.min(total, offset + CHUNK), show);
+      if (r.status === 409) {
+        offset = r.body.size || 0;
+        await sleep(500);
+        continue;
+      }
+      if (r.status !== 200) return failTask(t, r.body.error || 'فشل (' + r.status + ')');
+      offset = r.body.size;
+      tries = 0;
+      show(offset);
+      if (r.body.done) {
         t.state = 'done';
         t.li.classList.add('done');
         t.fill.style.width = '100%';
         t.status.textContent = 'تم';
         t.act.classList.add('hidden');
         setTimeout(() => t.li.remove(), 4000);
-      } else {
-        let reason = 'فشل (' + xhr.status + ')';
-        try {
-          reason = JSON.parse(xhr.responseText).error || reason;
-        } catch {}
-        failTask(t, reason);
+        return;
       }
-      resolve();
-    };
-    xhr.onerror = () => {
-      failTask(t, 'انقطع الاتصال بالسيرفر');
-      resolve();
-    };
-    xhr.onabort = () => {
-      failTask(t, 'أُلغي');
-      resolve();
-    };
-
-    const fd = new FormData();
-    fd.append('files', t.file, t.file.name);
-    xhr.send(fd);
-  });
+    } catch {
+      if (t.aborted) continue;
+      // Wi-Fi hiccup or the phone slept: wait and resume from what the server already has (~2 minutes of tries)
+      if (++tries > 40) return failTask(t, 'انقطع الاتصال — اضغط «إعادة» ليكمل من حيث وقف');
+      t.status.textContent = 'انقطع الاتصال، إعادة المحاولة…';
+      await sleep(3000);
+      offset = null;
+    }
+  }
 }
 
 /* ---------- shared files: search, sort, select, preview, delete, zip ---------- */
@@ -424,9 +543,20 @@ function renderFiles() {
     });
 
     const { label, group } = extInfo(f.rel);
-    const badge = document.createElement('span');
+    let badge = document.createElement('span');
     badge.className = 'ext' + (group ? ' ' + group : '');
     badge.textContent = label;
+    if (PREVIEW[extOf(f.rel)] === 'img') {
+      // shortcut: thumbnails load the full image (lazily, browser-cached); add server-side resizing if lists get slow
+      const fallback = badge;
+      badge = document.createElement('img');
+      badge.className = 'thumb';
+      badge.loading = 'lazy';
+      badge.alt = '';
+      badge.src = '/api/download?inline=1&rel=' + encodeURIComponent(f.rel);
+      badge.addEventListener('error', () => badge.replaceWith(fallback));
+      badge.addEventListener('click', () => openPreview(f.rel));
+    }
 
     const meta = document.createElement('div');
     meta.className = 'file-meta';
@@ -568,6 +698,122 @@ function renderClips() {
     list.appendChild(li);
   }
 }
+
+/* ---------- history, arrival notifications, clipboard sync, home-screen install ---------- */
+
+const HISTORY_LABEL = { in: 'وصل من', shared: 'أُضيف للجوال من', download: 'نزّله' };
+
+async function loadHistory() {
+  let list;
+  try {
+    const r = await fetch('/api/history', { cache: 'no-store' });
+    if (!r.ok) return $('#historyCard').classList.add('hidden');
+    list = (await r.json()).history || [];
+  } catch {
+    return;
+  }
+  const box = $('#history');
+  box.textContent = '';
+  $('#historyEmpty').classList.toggle('hidden', list.length > 0);
+  $('#historyClear').classList.toggle('hidden', !list.length);
+  for (const ev of list.slice(0, 40)) {
+    const li = document.createElement('li');
+    li.className = 'file';
+    const badge = document.createElement('span');
+    badge.className = 'ext ' + (ev.kind === 'download' ? 'out' : 'in');
+    badge.textContent = ev.kind === 'download' ? '↓' : '↑';
+    const meta = document.createElement('div');
+    meta.className = 'file-meta';
+    const name = document.createElement('span');
+    name.className = 'file-name';
+    name.textContent = ev.name;
+    name.title = ev.name;
+    const sub = document.createElement('span');
+    sub.className = 'file-sub';
+    sub.textContent = [`${HISTORY_LABEL[ev.kind] || ''} ${ev.by}`, fmtSize(ev.size), fmtDate(ev.t)].filter(Boolean).join(' • ');
+    meta.append(name, sub);
+    li.append(badge, meta);
+    box.appendChild(li);
+  }
+}
+
+function notifyArrival(ev) {
+  toast(`وصل «${ev.name.split('/').pop()}» من ${ev.by}`);
+  if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+    // same tag: a folder of 200 files replaces one notification instead of stacking 200
+    new Notification('وصل ملف جديد', { body: `${ev.name} — من ${ev.by}`, tag: 'wft-arrival', icon: '/icon.svg' });
+  }
+}
+
+let localExtrasReady = false;
+async function initLocalExtras() {
+  if (localExtrasReady) return;
+  localExtrasReady = true;
+
+  if ('Notification' in window && Notification.permission === 'default') {
+    const btn = $('#notifyBtn');
+    btn.classList.remove('hidden');
+    btn.addEventListener('click', async () => {
+      const p = await Notification.requestPermission();
+      btn.classList.add('hidden');
+      toast(p === 'granted' ? 'بيوصلك إشعار لما يوصل ملف من الجوال' : 'الإشعارات مرفوضة — تقدر تفعلها من إعدادات المتصفح');
+    });
+  }
+
+  try {
+    const s = await fetch('/api/settings', { cache: 'no-store' }).then((r) => r.json());
+    if (!s.clipSupported) return;
+    const box = $('#clipSync');
+    box.checked = !!s.clipSync;
+    $('#clipSyncWrap').classList.remove('hidden');
+    box.addEventListener('change', async () => {
+      try {
+        const r = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clipSync: box.checked }),
+        });
+        if (!r.ok) throw new Error();
+        toast(box.checked ? 'المزامنة شغالة — انسخ أي نص وبيظهر بالجوال' : 'أوقفت مزامنة الحافظة');
+      } catch {
+        box.checked = !box.checked;
+        toast('تعذر تغيير الإعداد');
+      }
+    });
+  } catch {}
+}
+
+let installPrompt = null;
+function initInstall() {
+  const btn = $('#installBtn');
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  if (standalone) return;
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    installPrompt = e;
+    btn.classList.remove('hidden');
+  });
+  if (window.matchMedia('(pointer: coarse)').matches) btn.classList.remove('hidden');
+  btn.addEventListener('click', async () => {
+    if (installPrompt) {
+      installPrompt.prompt();
+      installPrompt = null;
+      return;
+    }
+    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    toast(
+      ios
+        ? 'من Safari اضغط زر المشاركة ⬆️ ثم «إضافة إلى الشاشة الرئيسية»'
+        : 'افتح قائمة المتصفح ⋮ واختر «إضافة إلى الشاشة الرئيسية»',
+      6000
+    );
+  });
+}
+
+$('#historyClear').addEventListener('click', async () => {
+  if (!confirm('مسح سجل العمليات؟ الملفات نفسها ما تنحذف.')) return;
+  await fetch('/api/history', { method: 'DELETE' }).catch(() => {});
+});
 
 /* ---------- another computer: approval-based pairing with send/receive permissions ---------- */
 
@@ -926,12 +1172,12 @@ function sendOne(peer, file) {
   $('#peerQueue').appendChild(li);
 
   const xhr = new XMLHttpRequest();
+  const meter = [];
   xhr.open('POST', `${peerBase(peer)}/api/upload?to=uploads&t=${encodeURIComponent(peer.token)}`);
   xhr.upload.addEventListener('progress', (e) => {
     if (!e.lengthComputable) return;
-    const pct = Math.round((e.loaded / e.total) * 100);
-    fill.style.width = pct + '%';
-    status.textContent = pct + '%';
+    fill.style.width = Math.round((e.loaded / e.total) * 100) + '%';
+    status.textContent = progressLabel(meter, e.loaded, e.total);
   });
   xhr.addEventListener('load', () => {
     if (xhr.status >= 200 && xhr.status < 300) {

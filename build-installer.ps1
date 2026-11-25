@@ -20,7 +20,10 @@ Remove-Item $app -Recurse -Force
 Copy-Item (Join-Path $root 'setup\node-x64.msi') $stage
 Copy-Item (Join-Path $root 'installer\install.ps1'), (Join-Path $root 'installer\run.cmd') $stage
 
-$exe = Join-Path $dist 'WiFi-File-Transfer-Setup.exe'
+# IExpress reads the .sed as ASCII, so it must write to an ASCII path; the result is copied into dist\ afterwards
+# (this folder may sit under a non-English path such as "أدوات ودرايفرات").
+$final = Join-Path $dist 'WiFi-File-Transfer-Setup.exe'
+$exe = Join-Path $stage 'WiFi-File-Transfer-Setup.exe'
 Remove-Item $exe -Force -ErrorAction SilentlyContinue
 $files = 'run.cmd', 'install.ps1', 'app.zip', 'node-x64.msi'
 $strings = ($files | ForEach-Object -Begin { $i = 0 } -Process { "FILE$i=`"$_`""; $i++ }) -join "`r`n"
@@ -62,4 +65,5 @@ Start-Process "$env:SystemRoot\System32\iexpress.exe" -ArgumentList @('/N', '/Q'
 for ($i = 0; $i -lt 60 -and -not (Test-Path $exe); $i++) { Start-Sleep -Seconds 2 }
 if (-not (Test-Path $exe)) { throw 'IExpress did not produce the installer.' }
 Start-Sleep -Seconds 3
-Write-Host ("Built {0} ({1:N1} MB)" -f $exe, ((Get-Item $exe).Length / 1MB))
+Copy-Item $exe $final -Force
+Write-Host ("Built {0} ({1:N1} MB)" -f $final, ((Get-Item $final).Length / 1MB))
