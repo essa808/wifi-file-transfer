@@ -6,6 +6,10 @@
 
 [![تحميل المثبت](https://img.shields.io/badge/download-Windows%20Setup-2ea44f)](https://github.com/essa808/wifi-file-transfer/releases/latest)
 [![نسخة محمولة](https://img.shields.io/badge/download-Portable-blue)](https://github.com/essa808/wifi-file-transfer/releases/latest)
+[![release](https://img.shields.io/github/v/release/essa808/wifi-file-transfer?style=flat-square)](https://github.com/essa808/wifi-file-transfer/releases/latest)
+[![downloads](https://img.shields.io/github/downloads/essa808/wifi-file-transfer/total?style=flat-square)](https://github.com/essa808/wifi-file-transfer/releases)
+[![license](https://img.shields.io/github/license/essa808/wifi-file-transfer?style=flat-square)](LICENSE)
+[![platform](https://img.shields.io/badge/platform-Windows%20%2B%20any%20phone-2ea44f?style=flat-square)]()
 
 ![واجهة الجوال](docs/screenshot-phone.png)
 ![السجل ومزامنة النصوص](docs/screenshot-history.png)
